@@ -15,7 +15,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/tris/opda-shared-services/authorizer/authentication"
+	"github.com/ts-opda/opda-shared-services/authorizer/authentication"
 
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"

@@ -1,4 +1,4 @@
-module github.com/tris/opda-shared-services
+module github.com/ts-opda/opda-shared-services
 
 go 1.24
 
