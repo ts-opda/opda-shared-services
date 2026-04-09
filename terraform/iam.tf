@@ -1,8 +1,9 @@
 data "aws_caller_identity" "current" {}
 
-# The OIDC provider is created once by opda-ops and shared across all repos.
-data "aws_iam_openid_connect_provider" "github" {
-  url = "https://token.actions.githubusercontent.com"
+# The OIDC provider is created once by opda-ops. Its ARN is predictable so we
+# construct it directly rather than looking it up (avoids needing iam:List*).
+locals {
+  github_oidc_provider_arn = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:oidc-provider/token.actions.githubusercontent.com"
 }
 
 resource "aws_iam_role" "github_actions" {
@@ -14,7 +15,7 @@ resource "aws_iam_role" "github_actions" {
       Effect = "Allow"
       Action = "sts:AssumeRoleWithWebIdentity"
       Principal = {
-        Federated = data.aws_iam_openid_connect_provider.github.arn
+        Federated = local.github_oidc_provider_arn
       }
       Condition = {
         StringLike = {
