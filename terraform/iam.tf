@@ -79,11 +79,26 @@ resource "aws_iam_role_policy" "github_actions" {
         Action = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
         Resource = "arn:aws:s3:::ops-terraform-state-${data.aws_caller_identity.current.account_id}/opda-shared-services/*"
       },
+      # ── IAM self-management ────────────────────────────────────────────────
+      # The pipeline manages its own role (trust policy, inline policy, tags).
+      # Scoped to only this role's ARN.
       {
-        Sid    = "TerraformStateLock"
+        Sid    = "IAMSelfManagement"
         Effect = "Allow"
-        Action = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:DeleteItem"]
-        Resource = "arn:aws:dynamodb:${var.aws_region}:${data.aws_caller_identity.current.account_id}:table/ops-terraform-state-lock"
+        Action = [
+          "iam:GetRole",
+          "iam:GetRolePolicy",
+          "iam:ListRolePolicies",
+          "iam:ListAttachedRolePolicies",
+          "iam:ListInstanceProfilesForRole",
+          "iam:PutRolePolicy",
+          "iam:DeleteRolePolicy",
+          "iam:UpdateRole",
+          "iam:UpdateAssumeRolePolicy",
+          "iam:TagRole",
+          "iam:UntagRole",
+        ]
+        Resource = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/opda-shared-services-github-actions"
       },
     ]
   })
