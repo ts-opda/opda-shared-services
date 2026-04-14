@@ -291,6 +291,15 @@ func validateCnf(ctx context.Context, iResp introspectionResponse, clientCert st
 
 func handleRequest(ctx context.Context, event events.APIGatewayProxyRequest) (authentication.APIGatewayCustomAuthorizerResponse, error) {
 	l.InfoContext(ctx, "authenticating request")
+
+	if strings.ToLower(os.Getenv("BYPASS_AUTH")) == "true" {
+		l.InfoContext(ctx, "BYPASS_AUTH enabled — skipping introspection and cert binding")
+		lc := event.RequestContext
+		arn := fmt.Sprintf("arn:aws:execute-api:*:%s:%s/%s/%s/%s", lc.AccountID, lc.APIID, lc.Stage, "*", "*")
+		scope := "land-registry"
+		return generatePolicy("bypass", arn, authentication.AuthorizerResponseContext{Scope: &scope}), nil
+	}
+
 	l.InfoContext(ctx, "retrieving token from header")
 
 	ssmCertName := os.Getenv("SSM_TRANSPORT_CERTIFICATE_NAME")
@@ -366,14 +375,16 @@ func main() {
 
 	httpClient = xray.Client(http.DefaultClient)
 
-	for _, v := range []string{
-		"INTROSPECTION_ENDPOINT",
-		"CLIENT_ID",
-	} {
-		if _, found := os.LookupEnv(v); !found {
-			msg := fmt.Sprintf("environment variable %s not set", v)
-			l.ErrorContext(ctx, msg)
-			panic(msg)
+	if strings.ToLower(os.Getenv("BYPASS_AUTH")) != "true" {
+		for _, v := range []string{
+			"INTROSPECTION_ENDPOINT",
+			"CLIENT_ID",
+		} {
+			if _, found := os.LookupEnv(v); !found {
+				msg := fmt.Sprintf("environment variable %s not set", v)
+				l.ErrorContext(ctx, msg)
+				panic(msg)
+			}
 		}
 	}
 
