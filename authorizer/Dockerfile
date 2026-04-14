@@ -1,11 +1,6 @@
 # Build stage
 FROM golang:1.24-alpine AS builder
 
-ENV GO111MODULE=on
-ENV CGO_ENABLED=0
-ENV GOOS=linux
-ENV GOARCH=amd64
-
 WORKDIR /app
 
 COPY go.mod go.sum ./
@@ -13,11 +8,11 @@ RUN go mod download
 
 COPY . .
 
-RUN go build -o authorizer ./authorizer
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o bootstrap ./authorizer
 
 # Run stage — Lambda container image
-FROM public.ecr.aws/lambda/provided:al2023
+FROM scratch
 
-COPY --from=builder /app/authorizer /var/task/authorizer
+COPY --from=builder /app/bootstrap /bootstrap
 
-ENTRYPOINT ["/var/task/authorizer"]
+ENTRYPOINT ["/bootstrap"]
