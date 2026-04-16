@@ -2,9 +2,15 @@ package main
 
 import (
 	"context"
+	"crypto"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
+	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -12,8 +18,10 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/ts-opda/opda-shared-services/authorizer/authentication"
 
@@ -24,11 +32,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	"github.com/aws/aws-xray-sdk-go/xray"
-
-	"encoding/base64"
-	"encoding/json"
-	"encoding/pem"
-	"os"
 )
 
 var l *slog.Logger
@@ -51,6 +54,7 @@ var denyAllAuthResponse = authentication.APIGatewayCustomAuthorizerResponse{
 	},
 }
 var cert, key, ca []byte
+var signingKey *rsa.PrivateKey
 
 type cnfResponse struct {
 	X5TSha256 string `json:"x5t#S256"`
@@ -84,6 +88,98 @@ func normalisePEM(originalPEM string) string {
 	cleanCert = fmt.Sprintf("%s\n%s\n%s", beginCert, cleanCert, endCert)
 
 	return cleanCert
+}
+
+// generateJTI creates a random UUID v4 string for use as a JWT ID.
+func generateJTI() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	b[6] = (b[6] & 0x0f) | 0x40 // version 4
+	b[8] = (b[8] & 0x3f) | 0x80 // variant bits
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
+// buildClientAssertion creates a private_key_jwt signed with RS256.
+// The assertion is a compact JWS with no kid in the header (Raidiam does not require it).
+func buildClientAssertion(clientID, audience string, key *rsa.PrivateKey) (string, error) {
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"RS256","typ":"JWT"}`))
+
+	now := time.Now()
+	payload, err := json.Marshal(map[string]interface{}{
+		"iss": clientID,
+		"sub": clientID,
+		"aud": audience,
+		"jti": generateJTI(),
+		"iat": now.Unix(),
+		"exp": now.Add(5 * time.Minute).Unix(),
+	})
+	if err != nil {
+		return "", fmt.Errorf("marshal JWT payload: %w", err)
+	}
+	payloadEncoded := base64.RawURLEncoding.EncodeToString(payload)
+
+	signingInput := header + "." + payloadEncoded
+	digest := sha256.Sum256([]byte(signingInput))
+	sig, err := rsa.SignPKCS1v15(rand.Reader, key, crypto.SHA256, digest[:])
+	if err != nil {
+		return "", fmt.Errorf("sign JWT: %w", err)
+	}
+
+	return signingInput + "." + base64.RawURLEncoding.EncodeToString(sig), nil
+}
+
+// loadSigningKeyFromSSM fetches a PEM-encoded RSA private key from SSM and parses it.
+// Supports both PKCS#1 (BEGIN RSA PRIVATE KEY) and PKCS#8 (BEGIN PRIVATE KEY) formats.
+func loadSigningKeyFromSSM(ctx context.Context, paramName string) (*rsa.PrivateKey, error) {
+	local := strings.ToLower(os.Getenv("AWS_LOCAL")) == "true"
+	region := os.Getenv("REGION")
+
+	awsCfg, _ := config.LoadDefaultConfig(context.Background(), config.WithRegion(region))
+
+	var client *ssm.Client
+	if local {
+		client = ssm.NewFromConfig(awsCfg, func(o *ssm.Options) {
+			o.BaseEndpoint = aws.String("http://localstack.local:4566")
+			o.Credentials = credentials.NewStaticCredentialsProvider("test", "test", "")
+		})
+	} else {
+		client = ssm.NewFromConfig(awsCfg)
+	}
+
+	out, err := client.GetParameter(ctx, &ssm.GetParameterInput{
+		Name:           aws.String(paramName),
+		WithDecryption: aws.Bool(true),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("get signing key from SSM: %w", err)
+	}
+	if out.Parameter == nil || out.Parameter.Value == nil {
+		return nil, fmt.Errorf("SSM parameter %s is empty", paramName)
+	}
+
+	keyPEM := []byte(*out.Parameter.Value)
+	block, _ := pem.Decode(keyPEM)
+	if block == nil {
+		return nil, fmt.Errorf("failed to decode PEM block for signing key")
+	}
+
+	switch block.Type {
+	case "RSA PRIVATE KEY":
+		return x509.ParsePKCS1PrivateKey(block.Bytes)
+	case "PRIVATE KEY":
+		parsed, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+		if err != nil {
+			return nil, fmt.Errorf("parse PKCS8 signing key: %w", err)
+		}
+		rsaKey, ok := parsed.(*rsa.PrivateKey)
+		if !ok {
+			return nil, fmt.Errorf("signing key is not an RSA private key")
+		}
+		return rsaKey, nil
+	default:
+		return nil, fmt.Errorf("unsupported PEM block type for signing key: %s", block.Type)
+	}
 }
 
 // Helper to calculate the x5tsha256 for the client cert
@@ -144,6 +240,15 @@ func introspectToken(ctx context.Context, token string, lambdaCtx *authenticatio
 	form := url.Values{}
 	form.Add("token", token)
 	form.Add("client_id", os.Getenv("CLIENT_ID"))
+
+	assertion, err := buildClientAssertion(os.Getenv("CLIENT_ID"), introspectionEndpoint, signingKey)
+	if err != nil {
+		slog.ErrorContext(ctx, "failed to build client assertion", slog.String("error", err.Error()))
+		return nil, errUnauthorized
+	}
+	form.Add("client_assertion_type", "urn:ietf:params:oauth:client-assertion-type:jwt-bearer")
+	form.Add("client_assertion", assertion)
+
 	slog.InfoContext(ctx, "created introspection request", slog.Any("request", form))
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, introspectionEndpoint, strings.NewReader(form.Encode()))
 	if err != nil {
@@ -313,6 +418,12 @@ func handleRequest(ctx context.Context, event events.APIGatewayProxyRequest) (au
 		log.Fatalf("failed to load TLS materials from SSM: %v", err)
 	}
 
+	ssmSigningKeyName := os.Getenv("SSM_SIGNING_KEY_NAME")
+	signingKey, err = loadSigningKeyFromSSM(context.Background(), ssmSigningKeyName)
+	if err != nil {
+		log.Fatalf("failed to load signing key from SSM: %v", err)
+	}
+
 	token, err := getTokenFromHeader(event.Headers)
 	if err != nil {
 		l.ErrorContext(ctx, "malformed authorization header", slog.String("error", err.Error()))
@@ -379,6 +490,7 @@ func main() {
 		for _, v := range []string{
 			"INTROSPECTION_ENDPOINT",
 			"CLIENT_ID",
+			"SSM_SIGNING_KEY_NAME",
 		} {
 			if _, found := os.LookupEnv(v); !found {
 				msg := fmt.Sprintf("environment variable %s not set", v)
