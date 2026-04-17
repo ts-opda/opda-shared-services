@@ -114,7 +114,7 @@ func tlsConfiguration() *tls.Config {
 
 	return &tls.Config{
 		Certificates: []tls.Certificate{serverCert},
-		ClientAuth:   tls.RequireAndVerifyClientCert,
+		ClientAuth:   tls.VerifyClientCertIfGiven,
 		ClientCAs:    caPool,
 		MinVersion:   tls.VersionTLS12,
 	}
