@@ -113,21 +113,10 @@ func tlsConfiguration() *tls.Config {
 	}
 
 	return &tls.Config{
-		// Only hosts starting with "matls-" require mTLS.
-		GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
-			log.Printf("picking tls config for %s\n", hello.ServerName)
-			cfg := &tls.Config{
-				Certificates: []tls.Certificate{serverCert},
-				ClientAuth:   tls.NoClientCert,
-				MinVersion:   tls.VersionTLS12,
-			}
-			if strings.HasPrefix(hello.ServerName, "matls-") {
-				log.Println("mtls is required")
-				cfg.ClientAuth = tls.RequireAndVerifyClientCert
-				cfg.ClientCAs = caPool
-			}
-			return cfg, nil
-		},
+		Certificates: []tls.Certificate{serverCert},
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+		ClientCAs:    caPool,
+		MinVersion:   tls.VersionTLS12,
 	}
 }
 
