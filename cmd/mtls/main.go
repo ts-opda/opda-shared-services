@@ -64,12 +64,13 @@ func main() {
 }
 
 func reverseProxy() http.Handler {
-	slog.Info("parsing proxy target", slog.Any("target", os.Getenv("PROXY_HOST_TARGET")))
-	apiHost, err := url.Parse(os.Getenv("PROXY_HOST_TARGET"))
+	target := os.Getenv("PROXY_HOST_TARGET")
+	apiHost, err := parseProxyTarget(target)
 	if err != nil {
-		slog.Error("unable to upstream url", slog.String("err", err.Error()))
+		slog.Error("invalid proxy target", slog.String("err", err.Error()))
 		os.Exit(1)
 	}
+	slog.Info("parsed proxy target")
 	// Create reverse proxies with custom director to add headers
 	apiProxy := httputil.NewSingleHostReverseProxy(apiHost)
 	origDirector := apiProxy.Director
@@ -169,6 +170,23 @@ func loadTlsFromSSM(ctx context.Context, certName, keyName, caName string) (cert
 	}
 
 	return certPEM, keyPEM, caPEM, nil
+}
+
+func parseProxyTarget(target string) (*url.URL, error) {
+	apiHost, err := url.Parse(target)
+	if err != nil {
+		return nil, err
+	}
+	if apiHost.Scheme != "http" && apiHost.Scheme != "https" {
+		return nil, fmt.Errorf("unsupported proxy target scheme")
+	}
+	if apiHost.Host == "" {
+		return nil, fmt.Errorf("proxy target host is required")
+	}
+	if apiHost.User != nil {
+		return nil, fmt.Errorf("proxy target must not contain user info")
+	}
+	return apiHost, nil
 }
 
 func loggingMiddleware(h http.Handler) http.Handler {
